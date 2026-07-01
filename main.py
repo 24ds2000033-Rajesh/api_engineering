@@ -57,42 +57,48 @@ def decode_cursor(cursor_str: str) -> Optional[int]:
 # --- MIDDLEWARE WITH CORS BYPASS ---
 @app.middleware("http")
 async def rate_limiter(request: Request, call_next):
-    # CRITICAL FIX 1: Let all browser preflight requests pass without evaluation
+    # Always let browser CORS preflight requests bypass rate limiting
     if request.method == "OPTIONS":
         return await call_next(request)
-
+        
     client_id = request.headers.get("X-Client-Id")
     if not client_id:
         return await call_next(request)
 
     now = time.time()
     
+    # Initialize or fetch the sliding window bucket for this client ID
     if client_id not in rate_limit_db:
         rate_limit_db[client_id] = []
         
     timestamps = rate_limit_db[client_id]
+    
+    # Clear out older timestamps outside the 10-second window
     timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
     rate_limit_db[client_id] = timestamps
 
+    # Enforce the limit (15 requests per 10s)
     if len(timestamps) >= RATE_LIMIT_REQUESTS:
         retry_after = int(RATE_LIMIT_WINDOW - (now - timestamps[0]))
         retry_after = max(1, retry_after)
         
-        # CRITICAL FIX 2: Manually attach mandatory CORS response headers to the 429 response 
-        # Browser engines drop 429 error payloads if these cross-origin specs are missing
-        response = Response(
+        # Build standard response headers
+        headers = {
+            "Retry-After": str(retry_after),
+            "Access-Control-Allow-Origin": "*",  # Ensure CORS doesn't swallow the 429 response
+            "Access-Control-Expose-Headers": "Retry-After"  # Explicitly tell browsers they can read this header
+        }
+        
+        return Response(
             content='{"detail": "Too Many Requests. Rate limit exceeded."}',
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers=headers,
             media_type="application/json"
         )
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        response.headers["Retry-After"] = str(retry_after)
-        return response
 
+    # Log the successful request timestamp
     rate_limit_db[client_id].append(now)
     return await call_next(request)
-
 
 # --- ENDPOINTS ---
 
